@@ -10,21 +10,24 @@ $ go run worker.go [server ip:port]
 package main
 
 import (
-	"crypto/md5"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 var server_ip_port string
+var workerDomains []string             // domains this worker is responsible for
+var workerGraph map[string][]GraphLink // url1 -> {url2,workerIPHostingUrl2}
 
 // A stats struct that summarizes a set of latency measurements to an
 // internet host.
@@ -34,11 +37,16 @@ type LatencyStats struct {
 	Max    int // max measured latency in milliseconds to host
 }
 
-type LatencyStatsv2 struct {
-	Min    int // min measured latency in milliseconds to host
-	Median int // median measured latency in milliseconds to host
-	Max    int // max measured latency in milliseconds to host
-	Hash   [16]byte
+// A link for workerGraph
+type GraphLink struct {
+	URI      string
+	WorkerIP string
+}
+
+// Contains a site and a depth that some worker needs to crawl
+type ContinueCrawl struct {
+	URI   string
+	Depth string
 }
 
 /////////////// RPC structs
@@ -52,10 +60,31 @@ type MWebsiteReq struct {
 	SamplesPerWorker int    // Number of samples, >= 1
 }
 
-// Request that client sends in RPC call to MServer.GetWorkers
-type MWorkersReq struct {
-	SamplesPerWorker int // Number of samples, >= 1
+// Request that server sends in RPC call to MWorker.CrawlWebsite
+type MCrawlWebsiteReq struct {
+	URI       string // URI of the website to measure
+	Depth     int    // Depth to crawl to from URL
+	ServerRPC string // for the worker to make RPC calls
+	WorkerIP  string // IP of the worker according to the server
 }
+
+// Response to MWorker.CrawlWebsite
+type MCrawlWebsiteRes struct {
+	MyIP string
+}
+
+// Request that client/worker sends in RPC call to MServer.Crawl
+type CrawlReq struct {
+	URL   string // URL of the website to crawl
+	Depth int    // Depth to crawl to from URL
+}
+
+// Response to MServer.Crawl
+type CrawlRes struct {
+	WorkerIP string // workerIP that owns the uri that was crawled
+}
+
+/////////
 
 // Main workhorse method.
 func main() {
@@ -72,7 +101,8 @@ func main() {
 
 	done := make(chan int)
 
-	// Set up RPC so server can talk to it
+	workerGraph = make(map[string][]GraphLink)
+	// Set up RPC so server and other workers can talk to it
 	go func() {
 		wServer := rpc.NewServer()
 		w := new(MWorker)
@@ -95,7 +125,9 @@ func main() {
 	<-done
 }
 
-func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStatsv2) error {
+// MWorker.MeasureWebsite
+// measure the latency to the website
+func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStats) error {
 	var stats []int
 	uri := request.URI
 	numReq := request.SamplesPerWorker
@@ -103,7 +135,6 @@ func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStatsv2) err
 	// fetch webpage
 	var wg sync.WaitGroup
 	wg.Add(numReq)
-	var bodyHash [16]byte
 	for i := 0; i < numReq; i++ {
 		go func() {
 			defer wg.Done()
@@ -115,21 +146,16 @@ func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStatsv2) err
 				timeTaken := int(elapsed / time.Millisecond)
 				fmt.Fprintf(os.Stderr, "rtt to %s was %d\n", uri, timeTaken)
 				stats = append(stats, timeTaken)
-				tmp, _ := ioutil.ReadAll(response.Body)
-				hash := md5.New()
-				hash.Write(tmp)
-				bodyHash = md5.Sum(tmp)
 				response.Body.Close()
 			}
 		}()
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "site hash was %x\n", bodyHash)
 	sort.Ints(stats)
 	fmt.Fprintf(os.Stderr, "total samples actually taken was %d\n", len(stats))
 	var min, max, median int
 	if len(stats) == 0 {
-		min = 0
+		min = 99999
 		max = 0
 		median = 0
 	} else {
@@ -137,48 +163,6 @@ func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStatsv2) err
 		max = stats[len(stats)-1]
 		median = stats[len(stats)/2]
 	}
-	*reply = LatencyStatsv2{
-		Min:    min,    // min measured latency in milliseconds to host
-		Median: median, // median measured latency in milliseconds to host
-		Max:    max,    // max measured latency in milliseconds to host
-		Hash:   bodyHash,
-	}
-	return nil
-}
-
-// MServer.GetWorkers
-// latency stats per worker to the *server*
-func (m *MWorker) GetWorkers(request MWorkersReq, reply *LatencyStats) error {
-	var stats []int
-	numReq := request.SamplesPerWorker
-	fmt.Fprintf(os.Stderr, "client requested %d samples per worker to server\n", numReq)
-	conn := getConnection(":8431")
-	defer conn.Close()
-	serverIP := strings.Split(server_ip_port, ":")[0]
-	server := getAddr(serverIP + ":8431")
-	wbuf := []byte("hi")
-	rbuf := make([]byte, 1024)
-	// send RPC calls to send udp message to server
-	for i := 0; i < numReq; i++ {
-		fmt.Fprintf(os.Stderr, "sending message to server\n")
-		start := time.Now()
-		conn.WriteToUDP(wbuf, server)
-		conn.SetDeadline(time.Now().Add(time.Second))
-		_, err := conn.Read(rbuf)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "got nothing back\n")
-			continue
-		}
-		elapsed := time.Since(start)
-		timeTaken := int(elapsed / time.Millisecond)
-		fmt.Fprintf(os.Stderr, "rtt to server was %d\n", timeTaken)
-		stats = append(stats, timeTaken)
-	}
-	sort.Ints(stats)
-	fmt.Fprintf(os.Stderr, "total samples actually taken was %d\n", len(stats))
-	min := stats[0]
-	max := stats[len(stats)-1]
-	median := stats[len(stats)/2]
 	*reply = LatencyStats{
 		Min:    min,    // min measured latency in milliseconds to host
 		Median: median, // median measured latency in milliseconds to host
@@ -187,21 +171,172 @@ func (m *MWorker) GetWorkers(request MWorkersReq, reply *LatencyStats) error {
 	return nil
 }
 
+// MWorker.CrawlWebsite
+// recursively crawl the website given until depth==0
+func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes) error {
+	uri := request.URI
+	depth := request.Depth
+	serverIP := request.ServerRPC
+	myPubIP := request.WorkerIP
+	base, err := url.Parse(uri)
+	checkError("", err, false)
+
+	// for all depths (including 0), add the uri that this rpc was called with
+	// to the graph of this worker
+	emptyGL := GraphLink{WorkerIP: "end"}
+	if len(workerGraph[uri]) == 0 {
+		workerGraph[uri] = append(workerGraph[uri], emptyGL)
+	}
+	if !contains(workerDomains, base.Host) {
+		workerDomains = append(workerDomains, base.Host)
+	}
+
+	// if depth > 0,
+	// call crawler code on this uri
+	if depth > 0 {
+		links := crawl(uri)
+		// sanitize the links (clean up relative links)
+		for i, link := range links {
+			cleanLink := link
+			fmt.Println("original link is:" + cleanLink)
+			u, err := url.Parse(link)
+			checkError("", err, false)
+			cleanLink = base.ResolveReference(u).String()
+			// if !strings.HasPrefix(link, "http://") {
+			// 	if strings.HasPrefix(link, "/") {
+			// 		u, _ := url.Parse(uri)
+			// 		if strings.HasPrefix(link, "//") {
+			// 			// //hi.com/index.html -> http://hi.com/index.html
+			// 			cleanLink = u.Scheme + ":" + link
+			// 		} else {
+			// 			// /hi.html -> http://ubc.ca/hi.html
+			// 			cleanLink = u.Scheme + "://" + u.Host + link
+			// 		}
+			// 	} else {
+			// 		// hi.html -> http://ubc.ca/qqq/hi.html
+			// 		r := regexp.MustCompile("/[^/]*?$")
+			// 		upOneLevel := r.ReplaceAllString(uri, "/")
+			// 		cleanLink = uri + link
+			// 	}
+			// }
+			// r1 := regexp.MustCompile("/./(./)*")
+			// cleanLink = r1.ReplaceAllString(cleanLink, "/")
+			// r2 := regexp.MustCompile("/[^/]+/../([^/]+/../)*")
+			// cleanLink = r2.ReplaceAllString(cleanLink, "/")
+			fmt.Println("sanitized link is:" + cleanLink)
+			links[i] = cleanLink
+		}
+		// TODO: for all scraped links, continue scraping with depth-1 and/or instruct new workers to scrape
+		// TODO: if there are new domains, send RPC to see where domain should live
+		server, err := rpc.Dial("tcp", serverIP)
+		checkError("", err, false)
+		myself, err := rpc.Dial("tcp", "localhost:7369")
+		checkError("", err, false)
+		for i, link := range links {
+			u, err := url.Parse(link)
+			checkError("", err, false)
+			domain := u.Host
+			if contains(workerDomains, domain) {
+				// crawled link definitely belongs on this worker
+				// call own RPC to scrape this link
+				crawlReq := MCrawlWebsiteReq{
+					URI:       link,
+					Depth:     depth - 1,
+					ServerRPC: serverIP,
+					WorkerIP:  myPubIP,
+				}
+				var crawlRes MCrawlWebsiteRes
+				err = myself.Call("MWorker.CrawlWebsite", crawlReq, &crawlRes)
+				gl := GraphLink{
+					URI:      link,
+					WorkerIP: myPubIP,
+				}
+				if !containsLink(workerGraph[link], gl) {
+					workerGraph[link] = append(workerGraph[link], gl)
+				}
+			} else {
+				// crawled link is not one of my domains
+				// ask server to figure out who should crawl this link
+				// and have it return the ip of the worker who crawled
+				// so I can add in the link in my own graph
+				req := CrawlReq{
+					URL:   link,
+					Depth: depth - 1,
+				}
+				var res CrawlRes
+				err = server.Call("MServer.Crawl", req, &res)
+				checkError("", err, false)
+				gl := GraphLink{
+					URI:      link,
+					WorkerIP: res.WorkerIP,
+				}
+				if !containsLink(workerGraph[link], gl) {
+					workerGraph[link] = append(workerGraph[link], gl)
+				}
+			}
+
+		}
+	}
+
+	*reply = MCrawlWebsiteRes{
+		MyIP: myPubIP,
+	}
+	return nil
+}
+
+func crawl(uri string) (links []string) {
+	response, err := http.Get(uri)
+	checkError("", err, false)
+	body := response.Body
+	defer body.Close()
+	// much of the following code is adapted from
+	// https://schier.co/blog/2015/04/26/a-simple-web-scraper-in-go.html
+	z := html.NewTokenizer(body)
+	for {
+		tt := z.Next()
+		switch {
+		case tt == html.ErrorToken:
+			// end of site document, exit loop
+			return links
+		case tt == html.StartTagToken:
+			t := z.Token()
+			if t.Data == "a" {
+				for _, a := range t.Attr {
+					if a.Key == "href" {
+						fmt.Println("Found href:", a.Val)
+						if strings.HasSuffix(a.Val, ".html") {
+							if !strings.HasPrefix(a.Val, "https://") && !strings.HasPrefix(a.Val, "ftp://") && !strings.HasPrefix(a.Val, "mailto:") {
+								fmt.Println("legit link:", a.Val)
+								links = append(links, a.Val)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+func contains(arr []string, str string) bool {
+	for _, el := range arr {
+		if el == str {
+			return true
+		}
+	}
+	return false
+}
+
+func containsLink(arr []GraphLink, gl GraphLink) bool {
+	for _, el := range arr {
+		if el == gl {
+			return true
+		}
+	}
+	return false
+}
+
 // functions from previous assignments
-
-func getConnection(ip string) *net.UDPConn {
-	lAddr, err := net.ResolveUDPAddr("udp", ip)
-	checkError("", err, false)
-	l, err := net.ListenUDP("udp", lAddr)
-	checkError("", err, false)
-	return l
-}
-
-func getAddr(ip string) *net.UDPAddr {
-	addr, err := net.ResolveUDPAddr("udp", ip)
-	checkError("", err, false)
-	return addr
-}
 
 func checkError(msg string, err error, exit bool) {
 	if err != nil {

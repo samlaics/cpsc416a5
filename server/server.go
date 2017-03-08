@@ -23,7 +23,8 @@ import (
 	"strings"
 )
 
-var workerConns []string
+var workerConns []string                   // list of worker IPs
+var rpcListen string                       // ip port on which we are accepting rpc connections
 var workerToDomainList map[string][]string // workerIP -> array of domains that it owns
 
 // A stats struct that summarizes a set of latency measurements to an
@@ -32,13 +33,6 @@ type LatencyStats struct {
 	Min    int // min measured latency in milliseconds to host
 	Median int // median measured latency in milliseconds to host
 	Max    int // max measured latency in milliseconds to host
-}
-
-type LatencyStatsv2 struct {
-	Min    int // min measured latency in milliseconds to host
-	Median int // median measured latency in milliseconds to host
-	Max    int // max measured latency in milliseconds to host
-	Hash   [16]byte
 }
 
 /////////////// RPC structs
@@ -78,7 +72,7 @@ type GetWorkersRes struct {
 
 /////////
 
-// Request that client sends in RPC call to MServer.Crawl
+// Request that client/worker sends in RPC call to MServer.Crawl
 type CrawlReq struct {
 	URL   string // URL of the website to crawl
 	Depth int    // Depth to crawl to from URL
@@ -86,18 +80,21 @@ type CrawlReq struct {
 
 // Response to MServer.Crawl
 type CrawlRes struct {
-	WorkerIP string // workerIP
+	WorkerIP string // workerIP that owns the uri that was crawled
 }
 
 // Request that server sends in RPC call to MWorker.CrawlWebsite
 type MCrawlWebsiteReq struct {
-	URI                string // URI of the website to measure
-	Depth              int    // Depth to crawl to from URL
-	WorkerToDomainList map[string][]string
+	URI       string // URI of the website to measure
+	Depth     int    // Depth to crawl to from URL
+	ServerRPC string // for the worker to make RPC calls
+	WorkerIP  string // IP of the worker according to the server
 }
 
 // Response to MWorker.CrawlWebsite
-type MCrawlWebsiteRes struct{}
+type MCrawlWebsiteRes struct {
+	MyIP string
+}
 
 /////////
 
@@ -139,10 +136,11 @@ func main() {
 	// Extract the command line args.
 	listen_worker_ip_port := args[0]
 	listen_client_ip_port := args[1]
+	rpcListen = listen_client_ip_port
 
 	done := make(chan int)
 
-	// Set up RPC for client so it can talk with server
+	// Set up RPC for client/worker so it can talk with server
 	go func() {
 		cServer := rpc.NewServer()
 		c := new(MServer)
@@ -172,20 +170,6 @@ func main() {
 		}
 	}()
 
-	// // udp server for ping pong-ing messages
-	// go func() {
-	// 	listener := getConnection(":8431")
-	// 	wbuf := []byte("bye")
-	// 	rbuf := make([]byte, 1024)
-	// 	for {
-	// 		_, remote_addr, err := listener.ReadFromUDP(rbuf)
-	// 		checkError("", err, false)
-	// 		go func() {
-	// 			listener.WriteToUDP(wbuf, remote_addr)
-	// 		}()
-	// 	}
-	// }()
-
 	<-done
 }
 
@@ -195,55 +179,64 @@ func main() {
 // If depth is 1, then this should crawl URL and then recursively crawl all pages linked from URL (with depth 0).
 // This call must return the IP of the worker that is assigned as owner of the domain for URL.
 func (m *MServer) Crawl(request CrawlReq, reply *CrawlRes) error {
-	// TODO: check workerToDomainList to see if a worker already owns url domain
-	// if so, ask that worker to crawl the url; otherwise do below
-	stats := make(map[string]LatencyStats)
 	uri := request.URL
 	u, _ := url.Parse(uri)
-	domain := "http://" + u.Host
+	rootIndex := "http://" + u.Host + "/index.html"
+	domain := u.Host
 	depth := request.Depth
-	numReq := 5
-	for _, ip := range workerConns {
-		client, err := rpc.Dial("tcp", ip+":7369")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not connect to %s\n", ip+":7369")
-		}
-		var ls LatencyStats
-		WebReq := MWebsiteReq{
-			URI:              domain,
-			SamplesPerWorker: numReq,
-		}
-		err = client.Call("MWorker.MeasureWebsite", WebReq, &ls)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "got nothing back from %s\n", ip+":7369")
-		}
-		stats[ip] = ls
-	}
-	var bestIP string
-	minLatency := 99999
-	for ip, ls := range stats {
-		if ls.Min < minLatency {
-			minLatency = ls.Min
+	bestIP := "unknown"
+	// check workerToDomainList to see if a worker already owns url domain
+	// if so, ask that worker to crawl the url; otherwise measure which worker to choose
+	for ip, domains := range workerToDomainList {
+		if contains(domains, domain) {
 			bestIP = ip
+			break
 		}
 	}
-	// add worker ip -> domain to workerToDomainList
-	workerToDomainList[bestIP] = append(workerToDomainList[bestIP], domain)
-	// TODO: tell bestIP to crawl url
-	// bestIP will crawl url, and if depth > 0, will compare crawled urls with known urls
-	// if there are unknown urls, the bestIP worker will call findBestWorker to continue crawl
-	// and will call RPC to update workerToDomainList on server
-	client, err := rpc.Dial("tcp", bestIP+":7369")
+	if bestIP == "unknown" {
+		stats := make(map[string]LatencyStats)
+		numReq := 5
+		for _, ip := range workerConns {
+			worker, err := rpc.Dial("tcp", ip+":7369")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not connect to %s\n", ip+":7369")
+			}
+			var ls LatencyStats
+			WebReq := MWebsiteReq{
+				URI:              rootIndex,
+				SamplesPerWorker: numReq,
+			}
+			err = worker.Call("MWorker.MeasureWebsite", WebReq, &ls)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "got nothing back from %s\n", ip+":7369")
+			}
+			stats[ip] = ls
+		}
+		minLatency := 99999
+		for ip, ls := range stats {
+			if ls.Min < minLatency {
+				minLatency = ls.Min
+				bestIP = ip
+			}
+		}
+		// add worker ip -> domain to workerToDomainList
+		workerToDomainList[bestIP] = append(workerToDomainList[bestIP], domain)
+	}
+	// tell bestIP to crawl url
+	// bestIP will crawl url, and if depth > 0, will crawl links on the url
+	// if there are unknown domain urls, the bestIP worker will rpc call the server to continue the crawl
+	worker, err := rpc.Dial("tcp", bestIP+":7369")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not connect to %s\n", bestIP+":7369")
 	}
-	CrawlSiteReq := MCrawlWebsiteReq{
-		URI:                uri,
-		Depth:              depth,
-		WorkerToDomainList: workerToDomainList,
+	workerCrawl := MCrawlWebsiteReq{
+		URI:       uri,
+		Depth:     depth,
+		ServerRPC: rpcListen,
+		WorkerIP:  bestIP,
 	}
 	var crawlRes MCrawlWebsiteRes
-	err = client.Call("MWorker.CrawlWebsite", CrawlSiteReq, &crawlRes)
+	err = worker.Call("MWorker.CrawlWebsite", workerCrawl, &crawlRes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "got nothing back from %s\n", bestIP+":7369")
 	}
@@ -279,6 +272,15 @@ func (m *MServer) Domains(request DomainsReq, reply *DomainsRes) error {
 		Domains: domains,
 	}
 	return nil
+}
+
+func contains(arr []string, str string) bool {
+	for _, el := range arr {
+		if el == str {
+			return true
+		}
+	}
+	return false
 }
 
 // functions from previous assignment solutions
