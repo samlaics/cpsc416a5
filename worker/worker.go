@@ -218,7 +218,7 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 	if !contains(workerDomains, base.Host) {
 		workerDomains = append(workerDomains, base.Host)
 	}
-	fmt.Fprintf(os.Stderr, "might have initialized link key, graph is %#v\n", workerGraph)
+	//fmt.Fprintf(os.Stderr, "might have initialized link key, graph is %#v\n", workerGraph)
 
 	// if depth > 0,
 	// call crawler code on this uri
@@ -261,9 +261,9 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 					URI:      link,
 					WorkerIP: myPubIP,
 				}
-				if !containsLink(workerGraph[link], gl) {
+				if !containsLink(workerGraph[uri], gl) {
 					workerGraph[uri] = append(workerGraph[uri], gl)
-					fmt.Fprintf(os.Stderr, "\nadding gl %#v\n", gl)
+					fmt.Fprintf(os.Stderr, "\nadding gl from %s to %#v\n", uri, gl)
 				}
 			} else {
 				// crawled link is not one of my domains
@@ -281,12 +281,13 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 					URI:      link,
 					WorkerIP: res.WorkerIP,
 				}
-				if !containsLink(workerGraph[link], gl) {
+				if !containsLink(workerGraph[uri], gl) {
+					//fmt.Fprintf(os.Stderr, "\n%#v not found in %#v\n", gl, workerGraph[link])
 					workerGraph[uri] = append(workerGraph[uri], gl)
-					fmt.Fprintf(os.Stderr, "\nadding gl %#v\n", gl)
+					fmt.Fprintf(os.Stderr, "\nadding gl from %s to %#v\n", uri, gl)
 				}
 			}
-			fmt.Fprintf(os.Stderr, "added link, graph is %#v\n\n", workerGraph)
+			//fmt.Fprintf(os.Stderr, "added link, graph is %#v\n\n", workerGraph)
 		}
 	}
 
@@ -347,7 +348,7 @@ func (m *MWorker) MeasureOverlap(request OverlapReqWorker, reply *OverlapRes) er
 	overlapCnt := 0
 	for _, sublink := range subgraphLinks {
 		for _, graphlink := range workerGraph[sublink] {
-			fmt.Fprintf(os.Stderr, "check if %s in %#v\n", graphlink.URI, otherSubgraph)
+			fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
 			if contains(otherSubgraph, graphlink.URI) {
 				fmt.Fprintf(os.Stderr, "found a match\n")
 				overlapCnt++
@@ -402,7 +403,7 @@ func (m *MWorker) WorkerOverlap(request OverlapWithWorkerReq, reply *OverlapWith
 	overlapCnt := 0
 	for _, sublink := range subgraphLinks {
 		for _, graphlink := range workerGraph[sublink] {
-			fmt.Fprintf(os.Stderr, "check if %s in %#v\n", graphlink.URI, otherSubgraph)
+			fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
 			if contains(otherSubgraph, graphlink.URI) {
 				fmt.Fprintf(os.Stderr, "found a match\n")
 				overlapCnt++
@@ -465,7 +466,7 @@ func contains(arr []string, str string) bool {
 
 func containsLink(arr []GraphLink, gl GraphLink) bool {
 	for _, el := range arr {
-		if el == gl {
+		if el.URI == gl.URI {
 			return true
 		}
 	}
