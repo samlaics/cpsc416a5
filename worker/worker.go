@@ -84,6 +84,31 @@ type CrawlRes struct {
 	WorkerIP string // workerIP that owns the uri that was crawled
 }
 
+// Response to MServer.Overlap
+type OverlapRes struct {
+	NumPages int // Computed overlap between two URLs
+}
+
+// Request that server sends in RPC call to MWorker.MeasureOverlap
+type OverlapReqWorker struct {
+	URL1      string // URL arg to Overlap
+	URL2      string // The other URL arg to Overlap
+	WorkerIP1 string
+	WorkerIP2 string
+}
+
+// Request that worker sends in RPC call to MWorker.WorkerOverlap
+type OverlapWithWorkerReq struct {
+	Subgraph []string
+	URL      string // where to start subgraph on other worker
+}
+
+// Response that worker sends in RPC call to MWorker.WorkerOverlap
+type OverlapWithWorkerRes struct {
+	Subgraph []string
+	NumPages int // num of overlap
+}
+
 /////////
 
 // Main workhorse method.
@@ -232,7 +257,7 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 		checkError("", err, false)
 		myself, err := rpc.Dial("tcp", "localhost:7369")
 		checkError("", err, false)
-		for i, link := range links {
+		for _, link := range links {
 			u, err := url.Parse(link)
 			checkError("", err, false)
 			domain := u.Host
@@ -280,6 +305,117 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 
 	*reply = MCrawlWebsiteRes{
 		MyIP: myPubIP,
+	}
+	return nil
+}
+
+// MWorker.MeasureOverlap
+// measure the overlap with another worker's graph
+func (m *MWorker) MeasureOverlap(request OverlapReqWorker, reply *OverlapRes) error {
+	uri1 := request.URL1
+	uri2 := request.URL2
+	//workerIP1 := request.WorkerIP1
+	workerIP2 := request.WorkerIP2
+	uri1base, _ := url.Parse(uri1)
+	uri1domain := uri1base.Host
+	var linksToLookAt []GraphLink
+	var subgraphLinks []string
+	var otherSubgraph []string
+
+	// we own uri1 (or should)
+	// pass along all url's in uri1's domain in uri1's subgraph
+	uri1Links := workerGraph[uri1]
+	//subgraphLinks = append(subgraphLinks, uri1)
+	//var visited []string
+	linksToLookAt = append(linksToLookAt, uri1Links...)
+	for len(linksToLookAt) > 0 {
+		link := linksToLookAt[0].URI
+		base, _ := url.Parse(link)
+		linksToLookAt = append(linksToLookAt[:0], linksToLookAt[1:]...)
+		if base.Host != uri1domain || contains(subgraphLinks, link) {
+			continue
+		} else {
+			subgraphLinks = append(subgraphLinks, link)
+			for _, sublink := range workerGraph[link] {
+				if strings.Contains(sublink.URI, uri1domain) && !contains(subgraphLinks, sublink.URI) {
+					linksToLookAt = append(linksToLookAt, sublink)
+				}
+			}
+		}
+	}
+	// pass subgraphLinks as an arg to worker 2
+	worker2, err := rpc.Dial("tcp", workerIP2+":7369")
+	checkError("", err, false)
+	var res OverlapWithWorkerRes
+	overlapReq := OverlapWithWorkerReq{
+		Subgraph: subgraphLinks,
+		URL:      uri2,
+	}
+	err = worker2.Call("MWorker.WorkerOverlap", overlapReq, &res)
+	otherSubgraph = res.Subgraph
+	overlapCnt := 0
+	for _, sublink := range subgraphLinks {
+		for _, graphlink := range workerGraph[sublink] {
+			if contains(otherSubgraph, graphlink.URI) {
+				overlapCnt++
+			}
+		}
+	}
+	overlapCnt = overlapCnt + res.NumPages
+
+	*reply = OverlapRes{
+		NumPages: overlapCnt,
+	}
+	return nil
+}
+
+// MWorker.WorkerOverlap
+// measure the overlap with another worker's graph given the other's subgraph
+func (m *MWorker) WorkerOverlap(request OverlapWithWorkerReq, reply *OverlapWithWorkerRes) error {
+	otherSubgraph := request.Subgraph
+	uri2 := request.URL
+	uri2base, _ := url.Parse(uri2)
+	uri2domain := uri2base.Host
+	var linksToLookAt []GraphLink
+	var subgraphLinks []string
+
+	// we own uri2 (or should)
+	// first figure out all url's in uri2's domain in uri2's subgraph
+	uri2Links := workerGraph[uri2]
+	//subgraphLinks = append(subgraphLinks, uri1)
+	//var visited []string
+	linksToLookAt = append(linksToLookAt, uri2Links...)
+	for len(linksToLookAt) > 0 {
+		link := linksToLookAt[0].URI
+		base, _ := url.Parse(link)
+		linksToLookAt = append(linksToLookAt[:0], linksToLookAt[1:]...)
+		if base.Host != uri2domain || contains(subgraphLinks, link) {
+			continue
+		} else {
+			subgraphLinks = append(subgraphLinks, link)
+			for _, sublink := range workerGraph[link] {
+				if strings.Contains(sublink.URI, uri2domain) && !contains(subgraphLinks, sublink.URI) {
+					linksToLookAt = append(linksToLookAt, sublink)
+				}
+			}
+		}
+	}
+	// calculate overlap with the subgraph we were passed
+	// ie worker 1's subgraph
+	overlapCnt := 0
+	for _, sublink := range subgraphLinks {
+		for _, graphlink := range workerGraph[sublink] {
+			if contains(otherSubgraph, graphlink.URI) {
+				overlapCnt++
+			}
+		}
+	}
+
+	// pass our subgraph plus the overlap count back to the callling worker
+
+	*reply = OverlapWithWorkerRes{
+		Subgraph: subgraphLinks,
+		NumPages: overlapCnt,
 	}
 	return nil
 }

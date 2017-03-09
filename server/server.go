@@ -121,6 +121,14 @@ type OverlapRes struct {
 	NumPages int // Computed overlap between two URLs
 }
 
+// Request that server sends in RPC call to MWorker.MeasureOverlap
+type OverlapReqWorker struct {
+	URL1      string // URL arg to Overlap
+	URL2      string // The other URL arg to Overlap
+	WorkerIP1 string
+	WorkerIP2 string
+}
+
 /////////////// /RPC structs
 
 // Main workhorse method.
@@ -250,7 +258,40 @@ func (m *MServer) Crawl(request CrawlReq, reply *CrawlRes) error {
 // MServer.Overlap
 // Returns the number of pages in the overlap of the worker domain page graphs rooted at URL1 and URL2
 func (m *MServer) Overlap(request OverlapReq, reply *OverlapRes) error {
-	*reply = OverlapRes{}
+	uri1 := request.URL1
+	uri2 := request.URL2
+	u1, _ := url.Parse(uri1)
+	u2, _ := url.Parse(uri2)
+	u1Domain := u1.Host
+	u2Domain := u2.Host
+	var workerIP1 string
+	var workerIP2 string
+	for ip, domains := range workerToDomainList {
+		if contains(domains, u1Domain) {
+			workerIP1 = ip
+			break
+		}
+	}
+	for ip, domains := range workerToDomainList {
+		if contains(domains, u2Domain) {
+			workerIP2 = ip
+			break
+		}
+	}
+	worker1, err := rpc.Dial("tcp", workerIP1+":7369")
+	checkError("", err, false)
+	var res OverlapRes
+	overlapReq := OverlapReqWorker{
+		URL1:      uri1,
+		URL2:      uri2,
+		WorkerIP1: workerIP1,
+		WorkerIP2: workerIP2,
+	}
+	err = worker1.Call("MWorker.MeasureOverlap", overlapReq, &res)
+
+	*reply = OverlapRes{
+		NumPages: res.NumPages,
+	}
 	return nil
 }
 
