@@ -147,6 +147,7 @@ func main() {
 	rpcListen = listen_client_ip_port
 
 	done := make(chan int)
+	workerToDomainList = make(map[string][]string)
 
 	// Set up RPC for client/worker so it can talk with server
 	go func() {
@@ -266,13 +267,16 @@ func (m *MServer) Overlap(request OverlapReq, reply *OverlapRes) error {
 	u2Domain := u2.Host
 	var workerIP1 string
 	var workerIP2 string
+	fmt.Fprintf(os.Stderr, "worker to domain list %#v\n", workerToDomainList)
 	for ip, domains := range workerToDomainList {
+		fmt.Fprintf(os.Stderr, "check if %s in %#v\n", u1Domain, domains)
 		if contains(domains, u1Domain) {
 			workerIP1 = ip
 			break
 		}
 	}
 	for ip, domains := range workerToDomainList {
+		fmt.Fprintf(os.Stderr, "check if %s in %#v\n", u2Domain, domains)
 		if contains(domains, u2Domain) {
 			workerIP2 = ip
 			break

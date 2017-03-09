@@ -1,0 +1,43 @@
+Title: Sample Web crawl
+Author: Stewart Grant
+
+This directory is a sample for assignment 5. This example is composed of two
+web servers which run on two separate machines. The structure of directory machine 1 is as follows.
+
+machine1
+machine1/server.go
+machine1/index.html
+machine1/a/index.html
+machine1/b/index.html
+
+Machine2 is structured as follows
+
+machine2
+machine2/server.go
+machine2/index.html
+machine2/c/index.html
+
+To imitate the server on any machine go to the main directory of the machine and run the following command
+
+`go run server.go [publicIP]`
+
+note that no port number is needed the default is 8080. If you are running this
+on Azure then the ip is the public ip. If you are testing on your local machine
+then just use localhost.
+
+The index.html files form a directed graph
+machine1/index.html --> machine1/a/index.html
+machine1/index.html --> machine1/b/index.html
+machine1/index.html --> machine2/index.html ##########Remote link######This is the one you need to edit in the next step I don't know your ip
+machine1/index.html --> wantonsolutions.github.io ## my site
+
+machine1/a/index.html --> machine1/b/index.html
+
+machine2/index.html --> machine2/c/index.html
+
+###IMPORTANT##### I don't know where your machines live so the link from one
+website to the other needs to be done manually. To do this go into
+machine1/index.html and edit the link that I have marked to point to the vm or
+machine which is running machine 2.
+
+
