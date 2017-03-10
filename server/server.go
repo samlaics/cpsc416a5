@@ -46,22 +46,6 @@ type MWebsiteReq struct {
 	SamplesPerWorker int    // Number of samples, >= 1
 }
 
-// Response to:
-// MServer.MeasureWebsite:
-//   - latency stats per worker to a *URI*
-//   - (optional) Diff map
-// MServer.GetWorkers
-//   - latency stats per worker to the *server*
-type MRes struct {
-	Stats map[string]LatencyStats    // map: workerIP -> LatencyStats
-	Diff  map[string]map[string]bool // map: [workerIP x workerIP] -> True/False
-}
-
-// Request that client sends in RPC call to MServer.GetWorkers
-type MWorkersReq struct {
-	SamplesPerWorker int // Number of samples, >= 1
-}
-
 // Request that client sends in RPC call to MServer.GetWorkers
 type GetWorkersReq struct{}
 

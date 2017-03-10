@@ -43,12 +43,6 @@ type GraphLink struct {
 	WorkerIP string
 }
 
-// // Contains a site and a depth that some worker needs to crawl
-// type ContinueCrawl struct {
-// 	URI   string
-// 	Depth string
-// }
-
 /////////////// RPC structs
 
 // Resource server type.
@@ -181,7 +175,7 @@ func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStats) error
 	fmt.Fprintf(os.Stderr, "total samples actually taken was %d\n", len(stats))
 	var min, max, median int
 	if len(stats) == 0 {
-		min = 99999
+		min = 999
 		max = 0
 		median = 0
 	} else {
@@ -202,7 +196,6 @@ func (m *MWorker) MeasureWebsite(request MWebsiteReq, reply *LatencyStats) error
 func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes) error {
 	uri := request.URI
 	depth := request.Depth
-	//fmt.Fprintf(os.Stderr, "will use this to form server ip port: %s %s\n", server_ip_port, request.ServerRPC)
 	serverIP := strings.Split(server_ip_port, ":")[0]
 	serverIPPort := serverIP + ":" + strings.Split(request.ServerRPC, ":")[1]
 	myPubIP := request.WorkerIP
@@ -218,7 +211,6 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 	if !contains(workerDomains, base.Host) {
 		workerDomains = append(workerDomains, base.Host)
 	}
-	//fmt.Fprintf(os.Stderr, "might have initialized link key, graph is %#v\n", workerGraph)
 
 	// if depth > 0,
 	// call crawler code on this uri
@@ -237,10 +229,8 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 		// for all scraped links, continue scraping with depth-1 and/or instruct new workers to scrape
 		// if there are new domains, send RPC to see where domain should live
 		server, err := rpc.Dial("tcp", serverIPPort)
-		//fmt.Fprintf(os.Stderr, "public server ip port to connect to is %s\n", serverIPPort)
 		checkError("", err, false)
 		myself, err := rpc.Dial("tcp", myPubIP+":7369")
-		//fmt.Fprintf(os.Stderr, "my own public ip port to connect to is %s\n", myPubIP+":7369")
 		checkError("", err, false)
 		for _, link := range links {
 			u, err := url.Parse(link)
@@ -282,7 +272,6 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 					WorkerIP: res.WorkerIP,
 				}
 				if !containsLink(workerGraph[uri], gl) {
-					//fmt.Fprintf(os.Stderr, "\n%#v not found in %#v\n", gl, workerGraph[link])
 					workerGraph[uri] = append(workerGraph[uri], gl)
 					fmt.Fprintf(os.Stderr, "\nadding gl from %s to %#v\n", uri, gl)
 				}
@@ -302,26 +291,25 @@ func (m *MWorker) CrawlWebsite(request MCrawlWebsiteReq, reply *MCrawlWebsiteRes
 func (m *MWorker) MeasureOverlap(request OverlapReqWorker, reply *OverlapRes) error {
 	uri1 := request.URL1
 	uri2 := request.URL2
-	//workerIP1 := request.WorkerIP1
 	workerIP2 := request.WorkerIP2
 	uri1base, _ := url.Parse(uri1)
 	uri1domain := uri1base.Host
 	var linksToLookAt []GraphLink
 	var subgraphLinks []string
 	var otherSubgraph []string
-	fmt.Fprintf(os.Stderr, "w1: we are responsible for %#v\n", workerDomains)
-	fmt.Fprintf(os.Stderr, "w1: current graph is %#v\n", workerGraph)
+	fmt.Fprintf(os.Stderr, "\nw1: current graph is %#v\n\n", workerGraph)
 
 	// we own uri1 (or should)
 	// pass along all url's in uri1's domain in uri1's subgraph
 	uri1Links := workerGraph[uri1]
 	subgraphLinks = append(subgraphLinks, uri1)
-	//var visited []string
 	linksToLookAt = append(linksToLookAt, uri1Links...)
 	for len(linksToLookAt) > 0 {
 		link := linksToLookAt[0].URI
 		base, _ := url.Parse(link)
+		// delete the link we are looking at from the list
 		linksToLookAt = append(linksToLookAt[:0], linksToLookAt[1:]...)
+		// ignore links not in our domain, or duplicates (cycle)
 		if base.Host != uri1domain || contains(subgraphLinks, link) {
 			continue
 		} else {
@@ -333,7 +321,7 @@ func (m *MWorker) MeasureOverlap(request OverlapReqWorker, reply *OverlapRes) er
 			}
 		}
 	}
-	fmt.Fprintf(os.Stderr, "our subgraph links are %#v, will send\n", subgraphLinks)
+	fmt.Fprintf(os.Stderr, "w1: our subgraph links are %#v, will send\n", subgraphLinks)
 	// pass subgraphLinks as an arg to worker 2
 	worker2, err := rpc.Dial("tcp", workerIP2+":7369")
 	checkError("", err, false)
@@ -344,18 +332,18 @@ func (m *MWorker) MeasureOverlap(request OverlapReqWorker, reply *OverlapRes) er
 	}
 	err = worker2.Call("MWorker.WorkerOverlap", overlapReq, &res)
 	otherSubgraph = res.Subgraph
-	fmt.Fprintf(os.Stderr, "subgraph received was %#v\n", otherSubgraph)
+	fmt.Fprintf(os.Stderr, "w1:subgraph received was %#v\n", otherSubgraph)
 	overlapCnt := 0
 	for _, sublink := range subgraphLinks {
 		for _, graphlink := range workerGraph[sublink] {
-			fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
+			//fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
 			if contains(otherSubgraph, graphlink.URI) {
-				fmt.Fprintf(os.Stderr, "found a match\n")
+				fmt.Fprintf(os.Stderr, "link from %s to %s found, and in %#v\n", sublink, graphlink.URI, otherSubgraph)
 				overlapCnt++
 			}
 		}
 	}
-	fmt.Fprintf(os.Stderr, "sum of overlaps is %d plus %d\n", overlapCnt, res.NumPages)
+	fmt.Fprintf(os.Stderr, "sum of overlaps is ours: %d plus theirs: %d\n", overlapCnt, res.NumPages)
 	overlapCnt = overlapCnt + res.NumPages
 
 	*reply = OverlapRes{
@@ -373,14 +361,12 @@ func (m *MWorker) WorkerOverlap(request OverlapWithWorkerReq, reply *OverlapWith
 	uri2domain := uri2base.Host
 	var linksToLookAt []GraphLink
 	var subgraphLinks []string
-	fmt.Fprintf(os.Stderr, "w2: we are responsible for %#v\n", workerDomains)
-	fmt.Fprintf(os.Stderr, "w2: current graph is %#v\n", workerGraph)
+	fmt.Fprintf(os.Stderr, "\nw2: current graph is %#v\n\n", workerGraph)
 
 	// we own uri2 (or should)
 	// first figure out all url's in uri2's domain in uri2's subgraph
 	uri2Links := workerGraph[uri2]
 	subgraphLinks = append(subgraphLinks, uri2)
-	//var visited []string
 	linksToLookAt = append(linksToLookAt, uri2Links...)
 	for len(linksToLookAt) > 0 {
 		link := linksToLookAt[0].URI
@@ -403,16 +389,15 @@ func (m *MWorker) WorkerOverlap(request OverlapWithWorkerReq, reply *OverlapWith
 	overlapCnt := 0
 	for _, sublink := range subgraphLinks {
 		for _, graphlink := range workerGraph[sublink] {
-			fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
+			//fmt.Fprintf(os.Stderr, "for %s, check if %s in %#v\n", sublink, graphlink.URI, otherSubgraph)
 			if contains(otherSubgraph, graphlink.URI) {
-				fmt.Fprintf(os.Stderr, "found a match\n")
+				fmt.Fprintf(os.Stderr, "link from %s to %s found, and in %#v\n", sublink, graphlink.URI, otherSubgraph)
 				overlapCnt++
 			}
 		}
 	}
 
 	// pass our subgraph plus the overlap count back to the callling worker
-
 	*reply = OverlapWithWorkerRes{
 		Subgraph: subgraphLinks,
 		NumPages: overlapCnt,
@@ -423,6 +408,10 @@ func (m *MWorker) WorkerOverlap(request OverlapWithWorkerReq, reply *OverlapWith
 func crawl(uri string) (links []string) {
 	response, err := http.Get(uri)
 	checkError("", err, false)
+	// link dead, nothing to see here
+	if err != nil {
+		return links
+	}
 	body := response.Body
 	defer body.Close()
 	// much of the following code is adapted from
